@@ -1,0 +1,135 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Cores principais da Astra Online */
+  --astra-dark-blue: #1e3a5f;
+  --astra-light-blue: #4a9eff;
+  --astra-cyan: #00d4ff;
+
+  /* Cores principais baseadas na Astra */
+  --primary-blue: #1e3a5f;
+  --primary-blue-dark: #162d47;
+  --primary-blue-light: #4a9eff;
+
+  /* Cores do sidebar usando a paleta Astra */
+  --sidebar-bg: linear-gradient(135deg, #1e3a5f 0%, #2a4a6b 100%);
+  --sidebar-hover: rgba(74, 158, 255, 0.15);
+  --sidebar-active: rgba(74, 158, 255, 0.25);
+
+  /* Cores de fundo */
+  --bg-primary: #f8fafc;
+  --bg-secondary: #ffffff;
+  --bg-card: #ffffff;
+
+  /* Cores de texto */
+  --text-primary: #1e293b;
+  --text-secondary: #64748b;
+  --text-muted: #94a3b8;
+
+  /* Cores de estado */
+  --success: #10b981;
+  --warning: #f59e0b;
+  --error: #ef4444;
+
+  /* Sombras */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+
+  /* Bordas */
+  --border-radius: 12px;
+  --border-radius-sm: 8px;
+  --border-color: #e2e8f0;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+
+/* Utilitários customizados usando cores da Astra */
+.btn-primary {
+  background-color: var(--astra-dark-blue);
+  @apply hover:bg-opacity-90 text-white font-medium py-2.5 px-4 rounded-lg transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2;
+  box-shadow: 0 1px 3px rgba(30, 58, 95, 0.2);
+}
+
+.btn-primary:hover {
+  background-color: var(--primary-blue-dark);
+  box-shadow: 0 4px 8px rgba(30, 58, 95, 0.3);
+}
+
+.btn-primary:focus {
+  ring-color: var(--astra-dark-blue);
+}
+
+.btn-secondary {
+  @apply bg-white hover:bg-gray-50 text-gray-700 font-medium py-2.5 px-4 rounded-lg border border-gray-300 transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2;
+}
+
+.card {
+  @apply bg-white rounded-xl shadow-sm border border-gray-100 p-6;
+}
+
+.input-field {
+  @apply w-full px-4 py-3 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:border-transparent transition-all duration-200;
+  focus-ring-color: var(--astra-dark-blue);
+}
+
+.input-field:focus {
+  border-color: var(--astra-dark-blue);
+  box-shadow: 0 0 0 2px rgba(30, 58, 95, 0.2);
+}
+
+.sidebar-item {
+  @apply flex items-center px-4 py-3 text-white/80 hover:text-white hover:bg-white/10 rounded-lg transition-all duration-200 cursor-pointer;
+}
+
+.sidebar-item.active {
+  @apply text-white bg-white/20;
+}
+
+/* Animações suaves */
+.fade-in {
+  animation: fadeIn 0.3s ease-in-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Scrollbar personalizada */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Garantir que a navegação sempre apareça */
+.sidebar-navigation {
+  position: fixed !important;
+  top: 0;
+  left: 0;
+  height: 100vh;
+  z-index: 1000 !important;
+}
+
+.main-content {
+  margin-left: 80px; /* Largura da sidebar */
+}

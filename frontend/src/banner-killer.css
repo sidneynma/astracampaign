@@ -1,0 +1,98 @@
+/* Banner Killer CSS - Remove only specific version banner */
+
+/* Hide only very specific banner patterns with exact text */
+div[class~="bg-red-500"][class~="text-white"][class~="p-2"][class~="mb-4"][class~="text-center"][class~="font-bold"]:contains("VERSÃO ATUALIZADA") {
+  display: none !important;
+  visibility: hidden !important;
+}
+
+/* Hide elements containing the exact build version */
+*:contains("BUILD 2025-09-17-19:02") {
+  display: none !important;
+  visibility: hidden !important;
+}
+
+/* Ensure QR modal is properly displayed and centered */
+.qr-modal-overlay {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  z-index: 9999 !important;
+  background-color: rgba(0, 0, 0, 0.5) !important;
+}
+
+.qr-modal-content {
+  display: block !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  max-width: 28rem !important;
+  width: 100% !important;
+  margin: 1rem !important;
+}
+
+/* Force QR image to display - Ultra specific selectors */
+.qr-image,
+img[alt*="QR"],
+img[src^="data:image/png;base64"],
+img[src^="data:image/"],
+div[class*="modal"] img,
+div[class*="qr"] img,
+[role="dialog"] img,
+img[alt="QR Code"],
+img[alt="QR Code WhatsApp"],
+.qr-modal-content img {
+  display: block !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  width: 256px !important;
+  height: 256px !important;
+  margin: 0 auto !important;
+  max-width: none !important;
+  max-height: none !important;
+  min-width: 256px !important;
+  min-height: 256px !important;
+  border: 3px solid #10b981 !important;
+  background: white !important;
+  padding: 10px !important;
+  border-radius: 8px !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
+  z-index: 10000 !important;
+  position: relative !important;
+}
+
+/* Override any hidden or zero-size styles that might affect images */
+*[style*="display: none"] img[src^="data:image/png;base64"] {
+  display: block !important;
+}
+
+*[style*="visibility: hidden"] img[src^="data:image/png;base64"] {
+  visibility: visible !important;
+}
+
+*[style*="opacity: 0"] img[src^="data:image/png;base64"] {
+  opacity: 1 !important;
+}
+
+/* Additional ultra-specific QR code overrides */
+img[src^="data:image/png;base64,iVBOR"] {
+  display: block !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  width: 256px !important;
+  height: 256px !important;
+  border: 3px solid #10b981 !important;
+  background: white !important;
+  padding: 10px !important;
+}
+
+/* Override any CSS that might hide QR images */
+* img[alt="QR Code WhatsApp"] {
+  display: block !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+}

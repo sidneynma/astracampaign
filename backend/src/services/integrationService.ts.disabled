@@ -1,0 +1,744 @@
+import { PrismaClient } from '@prisma/client';
+import { websocketService } from './websocketService';
+import * as crypto from 'crypto';
+
+const prisma = new PrismaClient();
+
+export enum IntegrationType {
+  WEBHOOK = 'WEBHOOK',
+  ZAPIER = 'ZAPIER',
+  CRM = 'CRM',
+  ERP = 'ERP',
+  ECOMMERCE = 'ECOMMERCE',
+  EMAIL = 'EMAIL',
+  CALENDAR = 'CALENDAR',
+  STORAGE = 'STORAGE',
+  ANALYTICS = 'ANALYTICS',
+  CUSTOM = 'CUSTOM'
+}
+
+export enum SyncType {
+  SYNC_CONTACTS = 'sync_contacts',
+  SYNC_CAMPAIGNS = 'sync_campaigns',
+  SYNC_ORDERS = 'sync_orders',
+  WEBHOOK_RECEIVED = 'webhook_received',
+  EXPORT_DATA = 'export_data',
+  IMPORT_DATA = 'import_data'
+}
+
+interface IntegrationConfig {
+  id?: string;
+  name: string;
+  type: IntegrationType;
+  tenantId: string;
+  active: boolean;
+  config: any; // Configuração específica da integração
+  credentials?: any; // Credenciais criptografadas
+  webhookUrl?: string;
+  createdBy: string;
+}
+
+interface SyncResult {
+  success: boolean;
+  recordsProcessed: number;
+  recordsCreated: number;
+  recordsUpdated: number;
+  recordsSkipped: number;
+  errors: string[];
+  duration: number;
+}
+
+interface WebhookPayload {
+  integrationId: string;
+  tenantId: string;
+  event: string;
+  data: any;
+  timestamp: Date;
+  signature?: string;
+}
+
+export class IntegrationService {
+  private static instance: IntegrationService;
+  private encryptionKey: string;
+
+  private constructor() {
+    this.encryptionKey = process.env.ENCRYPTION_KEY || 'default-key-change-in-production';
+  }
+
+  public static getInstance(): IntegrationService {
+    if (!IntegrationService.instance) {
+      IntegrationService.instance = new IntegrationService();
+    }
+    return IntegrationService.instance;
+  }
+
+  // Criar nova integração
+  public async createIntegration(integrationData: IntegrationConfig): Promise<any> {
+    try {
+      console.log(`🔗 Criando integração: ${integrationData.name} (${integrationData.type})`);
+
+      // Criptografar credenciais se fornecidas
+      let encryptedCredentials = null;
+      if (integrationData.credentials) {
+        encryptedCredentials = this.encryptCredentials(integrationData.credentials);
+      }
+
+      // Gerar URL de webhook se necessário
+      let webhookUrl = integrationData.webhookUrl;
+      if (!webhookUrl && this.requiresWebhook(integrationData.type)) {
+        webhookUrl = this.generateWebhookUrl(integrationData.tenantId);
+      }
+
+      const integration = await prisma.integration.create({
+        data: {
+          name: integrationData.name,
+          type: integrationData.type,
+          tenantId: integrationData.tenantId,
+          active: integrationData.active,
+          config: integrationData.config,
+          credentials: encryptedCredentials,
+          webhookUrl,
+          createdBy: integrationData.createdBy
+        }
+      });
+
+      // Notificar criação
+      await websocketService.notifyTenant(integrationData.tenantId, {
+        title: 'Integração Criada',
+        message: `A integração "${integrationData.name}" foi criada com sucesso.`,
+        type: 'SUCCESS',
+        data: { integrationId: integration.id, integrationType: integrationData.type }
+      });
+
+      // Testar conexão se possível
+      if (integrationData.active) {
+        this.testConnection(integration.id).catch(error => {
+          console.error(`Erro ao testar conexão da integração ${integration.id}:`, error);
+        });
+      }
+
+      console.log(`✅ Integração criada: ${integration.name} (${integration.id})`);
+      return integration;
+
+    } catch (error) {
+      console.error('❌ Erro ao criar integração:', error);
+      throw error;
+    }
+  }
+
+  // Sincronizar dados com integração externa
+  public async syncWithIntegration(integrationId: string, syncType: SyncType, options?: any): Promise<SyncResult> {
+    const startTime = Date.now();
+    const syncId = `${integrationId}_${Date.now()}`;
+
+    try {
+      console.log(`🔄 Iniciando sincronização: ${syncType} (${syncId})`);
+
+      const integration = await prisma.integration.findUnique({
+        where: { id: integrationId },
+        include: { tenant: true }
+      });
+
+      if (!integration) {
+        throw new Error('Integração não encontrada');
+      }
+
+      if (!integration.active) {
+        throw new Error('Integração está inativa');
+      }
+
+      // Registrar início da sincronização
+      const syncRecord = await prisma.integrationSync.create({
+        data: {
+          integrationId,
+          type: syncType,
+          status: 'RUNNING',
+          startedAt: new Date(),
+          metadata: options
+        }
+      });
+
+      // Notificar início da sincronização
+      await websocketService.notifyTenant(integration.tenantId, {
+        title: 'Sincronização Iniciada',
+        message: `Sincronização com ${integration.name} iniciada.`,
+        type: 'INFO',
+        data: { integrationId, syncType, syncId: syncRecord.id }
+      });
+
+      let result: SyncResult;
+
+      // Executar sincronização baseada no tipo
+      switch (syncType) {
+        case SyncType.SYNC_CONTACTS:
+          result = await this.syncContacts(integration, options);
+          break;
+        case SyncType.SYNC_CAMPAIGNS:
+          result = await this.syncCampaigns(integration, options);
+          break;
+        case SyncType.SYNC_ORDERS:
+          result = await this.syncOrders(integration, options);
+          break;
+        case SyncType.EXPORT_DATA:
+          result = await this.exportData(integration, options);
+          break;
+        case SyncType.IMPORT_DATA:
+          result = await this.importData(integration, options);
+          break;
+        default:
+          throw new Error(`Tipo de sincronização não suportado: ${syncType}`);
+      }
+
+      const duration = Date.now() - startTime;
+      result.duration = duration;
+
+      // Atualizar registro de sincronização
+      await prisma.integrationSync.update({
+        where: { id: syncRecord.id },
+        data: {
+          status: result.success ? 'SUCCESS' : 'FAILED',
+          recordsCount: result.recordsProcessed,
+          errorMessage: result.errors.join('; ') || null,
+          completedAt: new Date()
+        }
+      });
+
+      // Atualizar última sincronização na integração
+      await prisma.integration.update({
+        where: { id: integrationId },
+        data: {
+          lastSyncAt: new Date(),
+          lastError: result.success ? null : result.errors.join('; ')
+        }
+      });
+
+      // Notificar resultado
+      await websocketService.notifyTenant(integration.tenantId, {
+        title: result.success ? 'Sincronização Concluída' : 'Erro na Sincronização',
+        message: result.success
+          ? `Sincronização com ${integration.name} concluída. ${result.recordsProcessed} registros processados.`
+          : `Erro na sincronização com ${integration.name}: ${result.errors[0] || 'Erro desconhecido'}`,
+        type: result.success ? 'SUCCESS' : 'ERROR',
+        data: {
+          integrationId,
+          syncType,
+          result: {
+            recordsProcessed: result.recordsProcessed,
+            duration: Math.round(duration / 1000)
+          }
+        }
+      });
+
+      console.log(`${result.success ? '✅' : '❌'} Sincronização finalizada: ${syncId} (${Math.round(duration / 1000)}s)`);
+      return result;
+
+    } catch (error) {
+      console.error(`❌ Erro na sincronização ${syncId}:`, error);
+
+      const duration = Date.now() - startTime;
+      const result: SyncResult = {
+        success: false,
+        recordsProcessed: 0,
+        recordsCreated: 0,
+        recordsUpdated: 0,
+        recordsSkipped: 0,
+        errors: [error instanceof Error ? error.message : 'Erro desconhecido'],
+        duration
+      };
+
+      // Tentar registrar erro na base de dados
+      try {
+        await prisma.integrationSync.create({
+          data: {
+            integrationId,
+            type: syncType,
+            status: 'FAILED',
+            errorMessage: result.errors[0],
+            startedAt: new Date(),
+            completedAt: new Date()
+          }
+        });
+      } catch (dbError) {
+        console.error('Erro ao registrar falha de sincronização:', dbError);
+      }
+
+      return result;
+    }
+  }
+
+  // Processar webhook recebido
+  public async processWebhook(payload: WebhookPayload): Promise<void> {
+    try {
+      console.log(`📥 Processando webhook: ${payload.event} (${payload.integrationId})`);
+
+      const integration = await prisma.integration.findUnique({
+        where: { id: payload.integrationId }
+      });
+
+      if (!integration || !integration.active) {
+        throw new Error('Integração não encontrada ou inativa');
+      }
+
+      // Verificar assinatura se configurada
+      if (integration.config.webhookSecret && payload.signature) {
+        const isValid = this.verifyWebhookSignature(payload, integration.config.webhookSecret);
+        if (!isValid) {
+          throw new Error('Assinatura do webhook inválida');
+        }
+      }
+
+      // Processar evento baseado no tipo
+      await this.processWebhookEvent(integration, payload);
+
+      // Registrar processamento
+      await prisma.integrationSync.create({
+        data: {
+          integrationId: payload.integrationId,
+          type: SyncType.WEBHOOK_RECEIVED,
+          status: 'SUCCESS',
+          recordsCount: 1,
+          metadata: { event: payload.event, data: payload.data },
+          startedAt: new Date(),
+          completedAt: new Date()
+        }
+      });
+
+      console.log(`✅ Webhook processado: ${payload.event}`);
+
+    } catch (error) {
+      console.error(`❌ Erro ao processar webhook:`, error);
+
+      // Registrar erro
+      try {
+        await prisma.integrationSync.create({
+          data: {
+            integrationId: payload.integrationId,
+            type: SyncType.WEBHOOK_RECEIVED,
+            status: 'FAILED',
+            errorMessage: error instanceof Error ? error.message : 'Erro desconhecido',
+            metadata: { event: payload.event },
+            startedAt: new Date(),
+            completedAt: new Date()
+          }
+        });
+      } catch (dbError) {
+        console.error('Erro ao registrar falha de webhook:', dbError);
+      }
+
+      throw error;
+    }
+  }
+
+  // Implementações específicas de sincronização
+  private async syncContacts(integration: any, options?: any): Promise<SyncResult> {
+    const result: SyncResult = {
+      success: true,
+      recordsProcessed: 0,
+      recordsCreated: 0,
+      recordsUpdated: 0,
+      recordsSkipped: 0,
+      errors: [],
+      duration: 0
+    };
+
+    try {
+      // Implementação específica baseada no tipo de integração
+      switch (integration.type) {
+        case IntegrationType.CRM:
+          return await this.syncContactsFromCRM(integration, options, result);
+        case IntegrationType.ECOMMERCE:
+          return await this.syncContactsFromEcommerce(integration, options, result);
+        default:
+          throw new Error(`Sincronização de contatos não implementada para ${integration.type}`);
+      }
+    } catch (error) {
+      result.success = false;
+      result.errors.push(error instanceof Error ? error.message : 'Erro desconhecido');
+      return result;
+    }
+  }
+
+  private async syncContactsFromCRM(integration: any, options: any, result: SyncResult): Promise<SyncResult> {
+    // Simulação de sincronização com CRM
+    console.log(`📋 Sincronizando contatos do CRM: ${integration.name}`);
+
+    // Aqui seria feita a integração real com APIs de CRM como Salesforce, HubSpot, etc.
+    const mockContacts = [
+      { name: 'João Silva', phone: '+5511999999999', email: 'joao@example.com' },
+      { name: 'Maria Santos', phone: '+5511888888888', email: 'maria@example.com' }
+    ];
+
+    for (const contact of mockContacts) {
+      try {
+        // Verificar se contato já existe
+        const existingContact = await prisma.contact.findFirst({
+          where: {
+            tenantId: integration.tenantId,
+            OR: [
+              { telefone: contact.phone },
+              { email: contact.email }
+            ]
+          }
+        });
+
+        if (existingContact) {
+          // Atualizar contato existente
+          await prisma.contact.update({
+            where: { id: existingContact.id },
+            data: {
+              nome: contact.name,
+              telefone: contact.phone,
+              email: contact.email,
+              tags: [...(existingContact.tags || []), 'CRM_SYNC']
+            }
+          });
+          result.recordsUpdated++;
+        } else {
+          // Criar novo contato
+          await prisma.contact.create({
+            data: {
+              nome: contact.name,
+              telefone: contact.phone,
+              email: contact.email,
+              tags: ['CRM_SYNC'],
+              tenantId: integration.tenantId
+            }
+          });
+          result.recordsCreated++;
+        }
+
+        result.recordsProcessed++;
+      } catch (error) {
+        console.error(`Erro ao processar contato ${contact.name}:`, error);
+        result.errors.push(`Erro ao processar ${contact.name}: ${error}`);
+      }
+    }
+
+    return result;
+  }
+
+  private async syncContactsFromEcommerce(integration: any, options: any, result: SyncResult): Promise<SyncResult> {
+    // Simulação de sincronização com e-commerce
+    console.log(`🛒 Sincronizando clientes do e-commerce: ${integration.name}`);
+
+    // Implementação similar ao CRM, mas focada em clientes de e-commerce
+    result.recordsProcessed = 0; // Placeholder
+    return result;
+  }
+
+  private async syncCampaigns(integration: any, options?: any): Promise<SyncResult> {
+    // Implementação de sincronização de campanhas
+    return {
+      success: true,
+      recordsProcessed: 0,
+      recordsCreated: 0,
+      recordsUpdated: 0,
+      recordsSkipped: 0,
+      errors: [],
+      duration: 0
+    };
+  }
+
+  private async syncOrders(integration: any, options?: any): Promise<SyncResult> {
+    // Implementação de sincronização de pedidos
+    return {
+      success: true,
+      recordsProcessed: 0,
+      recordsCreated: 0,
+      recordsUpdated: 0,
+      recordsSkipped: 0,
+      errors: [],
+      duration: 0
+    };
+  }
+
+  private async exportData(integration: any, options?: any): Promise<SyncResult> {
+    // Implementação de exportação de dados
+    return {
+      success: true,
+      recordsProcessed: 0,
+      recordsCreated: 0,
+      recordsUpdated: 0,
+      recordsSkipped: 0,
+      errors: [],
+      duration: 0
+    };
+  }
+
+  private async importData(integration: any, options?: any): Promise<SyncResult> {
+    // Implementação de importação de dados
+    return {
+      success: true,
+      recordsProcessed: 0,
+      recordsCreated: 0,
+      recordsUpdated: 0,
+      recordsSkipped: 0,
+      errors: [],
+      duration: 0
+    };
+  }
+
+  // Processar eventos de webhook
+  private async processWebhookEvent(integration: any, payload: WebhookPayload): Promise<void> {
+    switch (payload.event) {
+      case 'contact.created':
+      case 'contact.updated':
+        await this.handleContactWebhook(integration, payload);
+        break;
+      case 'order.created':
+      case 'order.updated':
+        await this.handleOrderWebhook(integration, payload);
+        break;
+      default:
+        console.log(`Evento de webhook não tratado: ${payload.event}`);
+    }
+  }
+
+  private async handleContactWebhook(integration: any, payload: WebhookPayload): Promise<void> {
+    const contactData = payload.data;
+
+    if (contactData.name && contactData.phone) {
+      await prisma.contact.upsert({
+        where: {
+          telefone: contactData.phone
+        },
+        update: {
+          nome: contactData.name,
+          email: contactData.email,
+          tags: ['WEBHOOK_SYNC']
+        },
+        create: {
+          nome: contactData.name,
+          telefone: contactData.phone,
+          email: contactData.email,
+          tags: ['WEBHOOK_SYNC'],
+          tenantId: integration.tenantId
+        }
+      });
+    }
+  }
+
+  private async handleOrderWebhook(integration: any, payload: WebhookPayload): Promise<void> {
+    // Processar webhook de pedido - implementar conforme necessário
+    console.log('📦 Processando webhook de pedido:', payload.data);
+  }
+
+  // Métodos auxiliares
+  public encryptCredentials(credentials: any): string {
+    const cipher = crypto.createCipher('aes192', this.encryptionKey);
+    let encrypted = cipher.update(JSON.stringify(credentials), 'utf8', 'hex');
+    encrypted += cipher.final('hex');
+    return encrypted;
+  }
+
+  private decryptCredentials(encryptedCredentials: string): any {
+    const decipher = crypto.createDecipher('aes192', this.encryptionKey);
+    let decrypted = decipher.update(encryptedCredentials, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return JSON.parse(decrypted);
+  }
+
+  private requiresWebhook(type: IntegrationType): boolean {
+    return [IntegrationType.WEBHOOK, IntegrationType.ZAPIER, IntegrationType.CUSTOM].includes(type);
+  }
+
+  private generateWebhookUrl(tenantId: string): string {
+    const baseUrl = process.env.BASE_URL || 'https://api.example.com';
+    const webhookId = crypto.randomBytes(16).toString('hex');
+    return `${baseUrl}/api/integrations/webhook/${tenantId}/${webhookId}`;
+  }
+
+  private verifyWebhookSignature(payload: WebhookPayload, secret: string): boolean {
+    const signature = crypto
+      .createHmac('sha256', secret)
+      .update(JSON.stringify(payload.data))
+      .digest('hex');
+    return signature === payload.signature;
+  }
+
+  public async testConnection(integrationId: string): Promise<boolean> {
+    try {
+      const integration = await prisma.integration.findUnique({
+        where: { id: integrationId }
+      });
+
+      if (!integration) {
+        return false;
+      }
+
+      // Implementar teste de conexão específico para cada tipo
+      console.log(`🔍 Testando conexão da integração: ${integration.name}`);
+
+      // Por enquanto, retornamos true - implementar testes reais posteriormente
+      return true;
+    } catch (error) {
+      console.error('Erro ao testar conexão:', error);
+      return false;
+    }
+  }
+
+  // Métodos públicos para gerenciamento
+  public async getIntegrations(tenantId: string, filters?: any): Promise<any[]> {
+    return await prisma.integration.findMany({
+      where: { tenantId, ...filters },
+      include: {
+        creator: { select: { nome: true } },
+        syncLogs: {
+          take: 5,
+          orderBy: { startedAt: 'desc' }
+        }
+      }
+    });
+  }
+
+  public async getIntegration(integrationId: string, tenantId: string): Promise<any | null> {
+    return await prisma.integration.findFirst({
+      where: { id: integrationId, tenantId },
+      include: {
+        creator: { select: { nome: true } },
+        syncLogs: {
+          take: 10,
+          orderBy: { startedAt: 'desc' }
+        }
+      }
+    });
+  }
+
+  public async updateIntegration(integrationId: string, tenantId: string, updateData: Partial<IntegrationConfig>): Promise<any> {
+    // Criptografar novas credenciais se fornecidas
+    if (updateData.credentials) {
+      updateData.credentials = this.encryptCredentials(updateData.credentials);
+    }
+
+    return await prisma.integration.update({
+      where: { id: integrationId, tenantId },
+      data: updateData as any
+    });
+  }
+
+  public async deleteIntegration(integrationId: string, tenantId: string): Promise<boolean> {
+    await prisma.integration.delete({
+      where: { id: integrationId, tenantId }
+    });
+    return true;
+  }
+
+  public async getSyncHistory(integrationId: string, tenantId: string): Promise<any[]> {
+    const integration = await prisma.integration.findFirst({
+      where: { id: integrationId, tenantId }
+    });
+
+    if (!integration) {
+      throw new Error('Integração não encontrada');
+    }
+
+    return await prisma.integrationSync.findMany({
+      where: { integrationId },
+      orderBy: { startedAt: 'desc' },
+      take: 50
+    });
+  }
+
+  public async getIntegrationStats(tenantId: string): Promise<any> {
+    const integrations = await prisma.integration.findMany({
+      where: { tenantId },
+      include: {
+        syncLogs: {
+          where: {
+            startedAt: {
+              gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) // Últimos 30 dias
+            }
+          }
+        }
+      }
+    });
+
+    const stats = {
+      totalIntegrations: integrations.length,
+      activeIntegrations: integrations.filter(i => i.active).length,
+      totalSyncs: integrations.reduce((sum, i) => sum + i.syncLogs.length, 0),
+      successfulSyncs: integrations.reduce((sum, i) =>
+        sum + i.syncLogs.filter(s => s.status === 'SUCCESS').length, 0),
+      failedSyncs: integrations.reduce((sum, i) =>
+        sum + i.syncLogs.filter(s => s.status === 'FAILED').length, 0),
+      byType: {} as { [key: string]: number }
+    };
+
+    // Contar por tipo
+    integrations.forEach(integration => {
+      stats.byType[integration.type] = (stats.byType[integration.type] || 0) + 1;
+    });
+
+    return stats;
+  }
+
+  public async syncData(integrationId: string, options: any): Promise<any> {
+    const integration = await prisma.integration.findUnique({
+      where: { id: integrationId }
+    });
+
+    if (!integration) {
+      throw new Error('Integração não encontrada');
+    }
+
+    if (!integration.active) {
+      throw new Error('Integração está inativa');
+    }
+
+    // Criar log de sincronização
+    const sync = await prisma.integrationSync.create({
+      data: {
+        integrationId,
+        direction: options.direction || 'BIDIRECTIONAL',
+        status: 'PENDING',
+        metadata: options.entities ? { entities: options.entities } : {},
+        triggeredBy: options.triggeredBy || null
+      }
+    });
+
+    try {
+      // Simular processo de sincronização
+      console.log(`🔄 Iniciando sincronização ${sync.id} para integração ${integration.name}`);
+
+      // Atualizar status para em progresso
+      await prisma.integrationSync.update({
+        where: { id: sync.id },
+        data: { status: 'PROCESSING' }
+      });
+
+      // Simular processamento
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      // Finalizar com sucesso
+      await prisma.integrationSync.update({
+        where: { id: sync.id },
+        data: {
+          status: 'SUCCESS',
+          finishedAt: new Date(),
+          recordsProcessed: 100,
+          recordsCreated: 10,
+          recordsUpdated: 90
+        }
+      });
+
+      console.log(`✅ Sincronização ${sync.id} concluída com sucesso`);
+      return sync;
+
+    } catch (error) {
+      // Marcar como erro
+      await prisma.integrationSync.update({
+        where: { id: sync.id },
+        data: {
+          status: 'ERROR',
+          finishedAt: new Date(),
+          error: error instanceof Error ? error.message : 'Erro desconhecido'
+        }
+      });
+
+      console.error(`❌ Erro na sincronização ${sync.id}:`, error);
+      throw error;
+    }
+  }
+}
+
+export const integrationService = IntegrationService.getInstance();

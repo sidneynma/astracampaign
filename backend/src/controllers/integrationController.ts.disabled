@@ -1,0 +1,542 @@
+import { Response } from 'express';
+import { validationResult } from 'express-validator';
+import { PrismaClient } from '@prisma/client';
+import { AuthenticatedRequest } from '../middleware/auth';
+import { integrationService } from '../services/integrationService';
+
+const prisma = new PrismaClient();
+
+export const getIntegrations = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const page = parseInt(req.query.page as string) || 1;
+    const pageSize = parseInt(req.query.pageSize as string) || 10;
+    const search = req.query.search as string;
+    const type = req.query.type as string;
+    const active = req.query.active ? req.query.active === 'true' : undefined;
+
+    const skip = (page - 1) * pageSize;
+
+    let where: any = {};
+
+    // Filtrar por tenant
+    if (req.user?.role !== 'SUPERADMIN') {
+      where.tenantId = req.user?.tenantId;
+    }
+
+    if (search) {
+      where.name = {
+        contains: search,
+        mode: 'insensitive'
+      };
+    }
+
+    if (type) {
+      where.type = type;
+    }
+
+    if (active !== undefined) {
+      where.active = active;
+    }
+
+    const [integrations, total] = await Promise.all([
+      prisma.integration.findMany({
+        where,
+        skip,
+        take: pageSize,
+        include: {
+          IntegrationSync: {
+            select: { id: true }
+          }
+        },
+        orderBy: { createdAt: 'desc' }
+      }),
+      prisma.integration.count({ where })
+    ]);
+
+    // Remove credenciais sensíveis da resposta
+    const sanitizedIntegrations = integrations.map(integration => {
+      const { credentials, ...sanitized } = integration;
+      return {
+        ...sanitized,
+        hasCredentials: Object.keys(credentials as any || {}).length > 0,
+        syncCount: integration.IntegrationSync.length
+      };
+    });
+
+    const totalPages = Math.ceil(total / pageSize);
+
+    res.json({
+      success: true,
+      data: {
+        integrations: sanitizedIntegrations,
+        pagination: {
+          page,
+          pageSize,
+          total,
+          totalPages
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Erro ao buscar integrações:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+};
+
+export const getIntegration = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+
+    let where: any = { id };
+
+    // Filtrar por tenant se não for SUPERADMIN
+    if (req.user?.role !== 'SUPERADMIN') {
+      where.tenantId = req.user?.tenantId;
+    }
+
+    const integration = await prisma.integration.findFirst({
+      where,
+      include: {
+        IntegrationSync: {
+          take: 5,
+          orderBy: { startedAt: 'desc' }
+        }
+      }
+    });
+
+    if (!integration) {
+      res.status(404).json({
+        success: false,
+        message: 'Integração não encontrada'
+      });
+      return;
+    }
+
+    // Remove credenciais sensíveis da resposta
+    const { credentials, ...sanitized } = integration;
+
+    res.json({
+      success: true,
+      data: {
+        integration: {
+          ...sanitized,
+          hasCredentials: Object.keys(credentials as any || {}).length > 0
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Erro ao buscar integração:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+};
+
+export const createIntegration = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({
+        success: false,
+        message: 'Dados inválidos',
+        errors: errors.array()
+      });
+      return;
+    }
+
+    const { name, type, config, credentials, active = true } = req.body;
+
+    // Verificar se o nome já está em uso no tenant
+    let where: any = { name };
+    if (req.user?.role !== 'SUPERADMIN') {
+      where.tenantId = req.user?.tenantId;
+    }
+
+    const existingIntegration = await prisma.integration.findFirst({
+      where
+    });
+
+    if (existingIntegration) {
+      res.status(400).json({
+        success: false,
+        message: 'Já existe uma integração com este nome'
+      });
+      return;
+    }
+
+    const integration = await integrationService.createIntegration({
+      name,
+      type,
+      config,
+      credentials,
+      active,
+      tenantId: req.user?.tenantId || '',
+      createdBy: req.user?.id || ''
+    });
+
+    // Remove credenciais sensíveis da resposta
+    const { credentials: _, ...sanitized } = integration;
+
+    res.status(201).json({
+      success: true,
+      message: 'Integração criada com sucesso',
+      data: {
+        integration: {
+          ...sanitized,
+          hasCredentials: Object.keys(credentials || {}).length > 0
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Erro ao criar integração:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+};
+
+export const updateIntegration = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({
+        success: false,
+        message: 'Dados inválidos',
+        errors: errors.array()
+      });
+      return;
+    }
+
+    const { id } = req.params;
+    const { name, type, config, credentials, active } = req.body;
+
+    // Verificar se a integração existe e pertence ao tenant
+    let where: any = { id };
+    if (req.user?.role !== 'SUPERADMIN') {
+      where.tenantId = req.user?.tenantId;
+    }
+
+    const existingIntegration = await prisma.integration.findFirst({
+      where
+    });
+
+    if (!existingIntegration) {
+      res.status(404).json({
+        success: false,
+        message: 'Integração não encontrada'
+      });
+      return;
+    }
+
+    // Verificar se o nome já está em uso por outra integração
+    if (name && name !== existingIntegration.name) {
+      const nameInUse = await prisma.integration.findFirst({
+        where: {
+          name,
+          id: { not: id },
+          tenantId: req.user?.role === 'SUPERADMIN' ? undefined : req.user?.tenantId
+        }
+      });
+
+      if (nameInUse) {
+        res.status(400).json({
+          success: false,
+          message: 'Nome já está em uso por outra integração'
+        });
+        return;
+      }
+    }
+
+    const updateData: any = {};
+    if (name !== undefined) updateData.name = name;
+    if (type !== undefined) updateData.type = type;
+    if (config !== undefined) updateData.config = config;
+    if (credentials !== undefined) {
+      updateData.credentials = integrationService.encryptCredentials(credentials);
+    }
+    if (active !== undefined) updateData.active = active;
+
+    const integration = await prisma.integration.update({
+      where: { id },
+      data: updateData
+    });
+
+    // Remove credenciais sensíveis da resposta
+    const { credentials: _, ...sanitized } = integration;
+
+    res.json({
+      success: true,
+      message: 'Integração atualizada com sucesso',
+      data: {
+        integration: {
+          ...sanitized,
+          hasCredentials: Object.keys(credentials || {}).length > 0
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Erro ao atualizar integração:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+};
+
+export const deleteIntegration = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+
+    // Verificar se a integração existe e pertence ao tenant
+    let where: any = { id };
+    if (req.user?.role !== 'SUPERADMIN') {
+      where.tenantId = req.user?.tenantId;
+    }
+
+    const existingIntegration = await prisma.integration.findFirst({
+      where
+    });
+
+    if (!existingIntegration) {
+      res.status(404).json({
+        success: false,
+        message: 'Integração não encontrada'
+      });
+      return;
+    }
+
+    // Verificar se há sincronizações em andamento
+    const runningSyncs = await prisma.integrationSync.findFirst({
+      where: {
+        integrationId: id,
+        status: 'PENDING'
+      }
+    });
+
+    if (runningSyncs) {
+      res.status(400).json({
+        success: false,
+        message: 'Não é possível deletar integração com sincronizações em andamento'
+      });
+      return;
+    }
+
+    await prisma.integration.delete({
+      where: { id }
+    });
+
+    res.json({
+      success: true,
+      message: 'Integração deletada com sucesso'
+    });
+  } catch (error) {
+    console.error('Erro ao deletar integração:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+};
+
+export const testIntegration = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+
+    // Verificar se a integração existe e pertence ao tenant
+    let where: any = { id };
+    if (req.user?.role !== 'SUPERADMIN') {
+      where.tenantId = req.user?.tenantId;
+    }
+
+    const integration = await prisma.integration.findFirst({
+      where
+    });
+
+    if (!integration) {
+      res.status(404).json({
+        success: false,
+        message: 'Integração não encontrada'
+      });
+      return;
+    }
+
+    const testResult = await integrationService.testConnection(id);
+
+    res.json({
+      success: true,
+      data: {
+        test: testResult
+      }
+    });
+  } catch (error) {
+    console.error('Erro ao testar integração:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+};
+
+export const syncIntegration = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { direction = 'BIDIRECTIONAL', entities } = req.body;
+
+    // Verificar se a integração existe e pertence ao tenant
+    let where: any = { id };
+    if (req.user?.role !== 'SUPERADMIN') {
+      where.tenantId = req.user?.tenantId;
+    }
+
+    const integration = await prisma.integration.findFirst({
+      where
+    });
+
+    if (!integration) {
+      res.status(404).json({
+        success: false,
+        message: 'Integração não encontrada'
+      });
+      return;
+    }
+
+    if (!integration.active) {
+      res.status(400).json({
+        success: false,
+        message: 'Integração está inativa'
+      });
+      return;
+    }
+
+    const sync = await integrationService.syncData(id, {
+      direction,
+      entities,
+      triggeredBy: req.user?.id
+    });
+
+    res.json({
+      success: true,
+      message: 'Sincronização iniciada com sucesso',
+      data: {
+        sync
+      }
+    });
+  } catch (error) {
+    console.error('Erro ao sincronizar integração:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+};
+
+export const getIntegrationLogs = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const page = parseInt(req.query.page as string) || 1;
+    const pageSize = parseInt(req.query.pageSize as string) || 10;
+    const status = req.query.status as string;
+
+    const skip = (page - 1) * pageSize;
+
+    // Verificar se a integração existe e pertence ao tenant
+    let integrationWhere: any = { id };
+    if (req.user?.role !== 'SUPERADMIN') {
+      integrationWhere.tenantId = req.user?.tenantId;
+    }
+
+    const integration = await prisma.integration.findFirst({
+      where: integrationWhere
+    });
+
+    if (!integration) {
+      res.status(404).json({
+        success: false,
+        message: 'Integração não encontrada'
+      });
+      return;
+    }
+
+    let where: any = { integrationId: id };
+    if (status) {
+      where.status = status;
+    }
+
+    const [syncs, total] = await Promise.all([
+      prisma.integrationSync.findMany({
+        where,
+        skip,
+        take: pageSize,
+        orderBy: { startedAt: 'desc' }
+      }),
+      prisma.integrationSync.count({ where })
+    ]);
+
+    const totalPages = Math.ceil(total / pageSize);
+
+    res.json({
+      success: true,
+      data: {
+        logs: syncs,
+        pagination: {
+          page,
+          pageSize,
+          total,
+          totalPages
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Erro ao buscar logs de integração:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+};
+
+export const handleWebhook = async (req: any, res: Response): Promise<void> => {
+  try {
+    const { integrationId } = req.params;
+    const payload = req.body;
+    const signature = req.headers['x-signature'] || req.headers['x-hub-signature-256'];
+
+    const integration = await prisma.integration.findUnique({
+      where: { id: integrationId }
+    });
+
+    if (!integration) {
+      res.status(404).json({
+        success: false,
+        message: 'Integração não encontrada'
+      });
+      return;
+    }
+
+    if (!integration.active) {
+      res.status(400).json({
+        success: false,
+        message: 'Integração inativa'
+      });
+      return;
+    }
+
+    await integrationService.processWebhook(integrationId, payload, signature as string || '');
+
+    res.json({
+      success: true,
+      message: 'Webhook processado com sucesso'
+    });
+  } catch (error) {
+    console.error('Erro ao processar webhook:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+};

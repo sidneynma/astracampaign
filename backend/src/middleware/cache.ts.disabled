@@ -1,0 +1,170 @@
+import { Request, Response, NextFunction } from 'express';
+import { redisService, CacheOptions } from '../services/redisService';
+import { AuthenticatedRequest } from './auth';
+
+export interface CacheMiddlewareOptions extends CacheOptions {
+  generateKey?: (req: AuthenticatedRequest) => string;
+  shouldCache?: (req: AuthenticatedRequest, res: Response) => boolean;
+  keyGenerator?: 'auto' | 'custom' | 'tenant';
+  invalidateOnMethods?: string[];
+}
+
+// Cache middleware for GET requests
+export const cacheMiddleware = (options: CacheMiddlewareOptions = {}) => {
+  return async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    // Only cache GET requests by default
+    if (req.method !== 'GET') {
+      return next();
+    }
+
+    try {
+      const cacheKey = generateCacheKey(req, options);
+
+      // Check if response should be cached
+      if (options.shouldCache && !options.shouldCache(req, res)) {
+        return next();
+      }
+
+      // Try to get cached response
+      const cachedResponse = await redisService.get(cacheKey, {
+        prefix: options.prefix || 'response'
+      });
+
+      if (cachedResponse) {
+        console.log(`🚀 Cache hit for key: ${cacheKey}`);
+        return res.json(cachedResponse);
+      }
+
+      // Override res.json to cache the response
+      const originalJson = res.json;
+      res.json = function(body: any) {
+        // Only cache successful responses
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          redisService.set(cacheKey, body, {
+            ttl: options.ttl || 300, // 5 minutes default
+            prefix: options.prefix || 'response'
+          }).catch(error => {
+            console.error('Failed to cache response:', error);
+          });
+        }
+
+        return originalJson.call(this, body);
+      };
+
+      next();
+    } catch (error) {
+      console.error('Cache middleware error:', error);
+      next();
+    }
+  };
+};
+
+// Cache invalidation middleware for write operations
+export const invalidateCacheMiddleware = (patterns: string[] | ((req: AuthenticatedRequest) => string[])) => {
+  return async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    const originalJson = res.json;
+
+    res.json = function(body: any) {
+      // Only invalidate cache on successful write operations
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        const invalidationPatterns = typeof patterns === 'function' ? patterns(req) : patterns;
+
+        invalidationPatterns.forEach(pattern => {
+          redisService.invalidatePattern(pattern).catch(error => {
+            console.error(`Failed to invalidate cache pattern ${pattern}:`, error);
+          });
+        });
+      }
+
+      return originalJson.call(this, body);
+    };
+
+    next();
+  };
+};
+
+// Tenant-specific cache
+export const tenantCacheMiddleware = (options: Omit<CacheMiddlewareOptions, 'keyGenerator'> = {}) => {
+  return cacheMiddleware({
+    ...options,
+    keyGenerator: 'tenant',
+    prefix: options.prefix || 'tenant'
+  });
+};
+
+// User-specific cache
+export const userCacheMiddleware = (options: Omit<CacheMiddlewareOptions, 'keyGenerator'> = {}) => {
+  return cacheMiddleware({
+    ...options,
+    generateKey: (req) => `user:${req.user?.id}:${req.path}:${JSON.stringify(req.query)}`,
+    prefix: options.prefix || 'user'
+  });
+};
+
+// Generate cache key based on request
+function generateCacheKey(req: AuthenticatedRequest, options: CacheMiddlewareOptions): string {
+  if (options.generateKey) {
+    return options.generateKey(req);
+  }
+
+  switch (options.keyGenerator) {
+    case 'tenant':
+      return `tenant:${req.user?.tenantId}:${req.path}:${JSON.stringify(req.query)}`;
+    case 'custom':
+      return options.generateKey ? options.generateKey(req) : req.path;
+    case 'auto':
+    default:
+      // Include method, path, query params, and user context
+      const baseKey = `${req.method}:${req.path}`;
+      const queryKey = Object.keys(req.query).length > 0 ? `:${JSON.stringify(req.query)}` : '';
+      const userKey = req.user ? `:user:${req.user.id}` : '';
+      const tenantKey = req.user?.tenantId ? `:tenant:${req.user.tenantId}` : '';
+
+      return `${baseKey}${queryKey}${userKey}${tenantKey}`;
+  }
+}
+
+// Specific cache configurations for different endpoints
+export const contactsCacheMiddleware = tenantCacheMiddleware({
+  ttl: 300, // 5 minutes
+  shouldCache: (req) => !req.query.search || req.query.search.toString().length > 2
+});
+
+export const campaignsCacheMiddleware = tenantCacheMiddleware({
+  ttl: 180, // 3 minutes
+  shouldCache: (req) => req.method === 'GET'
+});
+
+export const analyticsCacheMiddleware = tenantCacheMiddleware({
+  ttl: 600, // 10 minutes
+  shouldCache: (req) => req.path.includes('/analytics')
+});
+
+export const reportsCacheMiddleware = tenantCacheMiddleware({
+  ttl: 900, // 15 minutes
+  shouldCache: (req) => req.path.includes('/reports')
+});
+
+// Cache invalidation patterns
+export const contactsInvalidationMiddleware = invalidateCacheMiddleware((req) => [
+  `*tenant:${req.user?.tenantId}:/api/contatos*`,
+  `*tenant:${req.user?.tenantId}:/api/analytics*`,
+  `*tenant:${req.user?.tenantId}:/api/reports*`
+]);
+
+export const campaignsInvalidationMiddleware = invalidateCacheMiddleware((req) => [
+  `*tenant:${req.user?.tenantId}:/api/campaigns*`,
+  `*tenant:${req.user?.tenantId}:/api/analytics*`,
+  `*tenant:${req.user?.tenantId}:/api/reports*`
+]);
+
+// Cache warming functions
+export async function warmContactsCache(tenantId: string): Promise<void> {
+  console.log(`🔥 Warming contacts cache for tenant ${tenantId}`);
+  // Implementation would make requests to key endpoints to populate cache
+}
+
+export async function warmAnalyticsCache(tenantId: string): Promise<void> {
+  console.log(`🔥 Warming analytics cache for tenant ${tenantId}`);
+  // Implementation would pre-calculate analytics data
+}

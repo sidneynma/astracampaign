@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  backend-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3003:3003"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres123@disparo_postgres:5432/contacts?schema=public
+      - PORT=3003
+      - NODE_ENV=development
+    networks:
+      - network_public
+    volumes:
+      - .:/app
+      - /app/node_modules
+    command: npm run dev
+
+networks:
+  network_public:
+    external: true

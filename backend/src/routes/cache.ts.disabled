@@ -1,0 +1,79 @@
+import { Router } from 'express';
+import { query, param } from 'express-validator';
+import { authMiddleware } from '../middleware/auth';
+import { adminMiddleware } from '../middleware/auth';
+import {
+  getCacheStats,
+  clearCache,
+  getCacheKeys,
+  getCacheValue,
+  setCacheValue,
+  invalidateCachePattern,
+  warmCache,
+  getCacheHealth
+} from '../controllers/cacheController';
+
+const router = Router();
+
+// All cache routes require authentication and admin privileges
+router.use(authMiddleware);
+router.use(adminMiddleware);
+
+// Get cache statistics and health
+router.get('/stats', getCacheStats);
+
+// Get cache health status
+router.get('/health', getCacheHealth);
+
+// Get cache keys with optional pattern filter
+router.get('/keys',
+  [
+    query('pattern').optional().isString().trim().withMessage('Pattern deve ser uma string'),
+    query('limit').optional().isInt({ min: 1, max: 1000 }).withMessage('Limite deve ser entre 1 e 1000')
+  ],
+  getCacheKeys
+);
+
+// Get specific cache value
+router.get('/key/:key',
+  [
+    param('key').isString().notEmpty().withMessage('Key é obrigatória')
+  ],
+  getCacheValue
+);
+
+// Set cache value
+router.post('/key/:key',
+  [
+    param('key').isString().notEmpty().withMessage('Key é obrigatória'),
+    query('ttl').optional().isInt({ min: 1 }).withMessage('TTL deve ser um número positivo')
+  ],
+  setCacheValue
+);
+
+// Clear all cache or specific pattern
+router.delete('/clear',
+  [
+    query('pattern').optional().isString().trim().withMessage('Pattern deve ser uma string')
+  ],
+  clearCache
+);
+
+// Invalidate cache by pattern
+router.post('/invalidate',
+  [
+    query('pattern').isString().notEmpty().withMessage('Pattern é obrigatório')
+  ],
+  invalidateCachePattern
+);
+
+// Warm cache for specific tenant
+router.post('/warm',
+  [
+    query('tenantId').optional().isUUID().withMessage('TenantId deve ser um UUID válido'),
+    query('type').optional().isIn(['contacts', 'analytics', 'campaigns', 'all']).withMessage('Tipo deve ser contacts, analytics, campaigns ou all')
+  ],
+  warmCache
+);
+
+export default router;

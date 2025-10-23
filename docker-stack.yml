@@ -1,0 +1,110 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_DB=contacts
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - network_public
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    networks:
+      - network_public
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+
+  backend:
+    image: work-backend:v0.0.2-20251020c
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/contacts?schema=public
+      REDIS_URL: redis://redis:6379
+      REDIS_PREFIX: work_app
+      PORT: 3001
+      NODE_ENV: production
+      JWT_SECRET: your-super-secret-jwt-key-at-least-32-characters-long-trecofantastico
+      JWT_EXPIRES_IN: 24h
+      DEFAULT_WAHA_HOST: ""
+      DEFAULT_WAHA_API_KEY: ""
+      DEFAULT_EVOLUTION_HOST: ""
+      DEFAULT_EVOLUTION_API_KEY: ""
+      DEFAULT_COMPANY_NAME: ""
+      DEFAULT_PAGE_TITLE: "Sistema de Gestão de Contatos"
+      ALLOWED_ORIGINS: https://work.trecofantastico.com.br,http://work.trecofantastico.com.br,http://work_frontend,http://work_frontend:80
+    networks:
+      - network_public
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - contacts_data:/app/data
+      - uploads_data:/app/uploads
+      - backup_data:/app/backups
+    ports:
+      - 3002:3001
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=network_public
+        - traefik.http.routers.work-backend.rule=Host(`work.trecofantastico.com.br`) && PathPrefix(`/api`)
+        - traefik.http.routers.work-backend.entrypoints=web,websecure
+        - traefik.http.routers.work-backend.tls=true
+        - traefik.http.routers.work-backend.tls.certresolver=letsencryptresolver
+        - traefik.http.services.work-backend.loadbalancer.server.port=3001
+
+  frontend:
+    image: work-frontend:v0.0.2-20251020a
+    networks:
+      - network_public
+    depends_on:
+      - backend
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=network_public
+        - traefik.http.routers.work-frontend.rule=Host(`work.trecofantastico.com.br`)
+        - traefik.http.routers.work-frontend.entrypoints=web,websecure
+        - traefik.http.routers.work-frontend.tls=true
+        - traefik.http.routers.work-frontend.tls.certresolver=letsencryptresolver
+        - traefik.http.services.work-frontend.loadbalancer.server.port=80
+
+networks:
+  network_public:
+    external: true
+
+volumes:
+  postgres_data:
+  redis_data:
+  contacts_data:
+  uploads_data:
+  backup_data:

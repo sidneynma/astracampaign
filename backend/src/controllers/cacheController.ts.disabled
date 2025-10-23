@@ -1,0 +1,286 @@
+import { Response } from 'express';
+import { validationResult } from 'express-validator';
+import { AuthenticatedRequest } from '../middleware/auth';
+import { redisService } from '../services/redisService';
+import { warmContactsCache, warmAnalyticsCache } from '../middleware/cache';
+
+export const getCacheStats = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const stats = await redisService.getStats();
+
+    res.json({
+      success: true,
+      data: {
+        stats,
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    console.error('Erro ao buscar estatísticas do cache:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+};
+
+export const getCacheHealth = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const isHealthy = await redisService.healthCheck();
+
+    res.json({
+      success: true,
+      data: {
+        healthy: isHealthy,
+        status: isHealthy ? 'connected' : 'disconnected',
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    console.error('Erro ao verificar saúde do cache:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+};
+
+export const getCacheKeys = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const pattern = req.query.pattern as string || '*';
+    const limit = parseInt(req.query.limit as string) || 100;
+
+    // Note: In production, be careful with KEYS command as it can be slow
+    // Consider using SCAN for large datasets
+    const keys = await redisService.invalidatePattern(pattern);
+
+    res.json({
+      success: true,
+      data: {
+        pattern,
+        keyCount: keys,
+        limit,
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    console.error('Erro ao buscar chaves do cache:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+};
+
+export const getCacheValue = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { key } = req.params;
+
+    const value = await redisService.get(key);
+
+    if (value !== null) {
+      res.json({
+        success: true,
+        data: {
+          key,
+          value,
+          exists: true,
+          timestamp: new Date().toISOString()
+        }
+      });
+    } else {
+      res.json({
+        success: true,
+        data: {
+          key,
+          value: null,
+          exists: false,
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
+  } catch (error) {
+    console.error(`Erro ao buscar valor da chave ${req.params.key}:`, error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+};
+
+export const setCacheValue = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({
+        success: false,
+        message: 'Dados inválidos',
+        errors: errors.array()
+      });
+      return;
+    }
+
+    const { key } = req.params;
+    const { value } = req.body;
+    const ttl = req.query.ttl ? parseInt(req.query.ttl as string) : undefined;
+
+    const success = await redisService.set(key, value, { ttl });
+
+    if (success) {
+      res.json({
+        success: true,
+        message: 'Valor definido com sucesso',
+        data: {
+          key,
+          ttl,
+          timestamp: new Date().toISOString()
+        }
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        message: 'Erro ao definir valor no cache'
+      });
+    }
+  } catch (error) {
+    console.error(`Erro ao definir valor da chave ${req.params.key}:`, error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+};
+
+export const clearCache = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const pattern = req.query.pattern as string;
+
+    let clearedKeys = 0;
+
+    if (pattern) {
+      // Clear specific pattern
+      clearedKeys = await redisService.invalidatePattern(pattern);
+    } else {
+      // Clear all cache
+      const success = await redisService.flushall();
+      if (!success) {
+        res.status(500).json({
+          success: false,
+          message: 'Erro ao limpar cache'
+        });
+        return;
+      }
+      clearedKeys = -1; // Indicates full flush
+    }
+
+    res.json({
+      success: true,
+      message: pattern ? `Cache limpo para padrão: ${pattern}` : 'Todo cache foi limpo',
+      data: {
+        pattern: pattern || 'all',
+        clearedKeys,
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    console.error('Erro ao limpar cache:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+};
+
+export const invalidateCachePattern = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({
+        success: false,
+        message: 'Dados inválidos',
+        errors: errors.array()
+      });
+      return;
+    }
+
+    const pattern = req.query.pattern as string;
+
+    const invalidatedKeys = await redisService.invalidatePattern(pattern);
+
+    res.json({
+      success: true,
+      message: `Cache invalidado para padrão: ${pattern}`,
+      data: {
+        pattern,
+        invalidatedKeys,
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    console.error(`Erro ao invalidar padrão ${req.query.pattern}:`, error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+};
+
+export const warmCache = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      res.status(400).json({
+        success: false,
+        message: 'Dados inválidos',
+        errors: errors.array()
+      });
+      return;
+    }
+
+    const tenantId = req.query.tenantId as string || req.user?.tenantId;
+    const type = req.query.type as string || 'all';
+
+    if (!tenantId) {
+      res.status(400).json({
+        success: false,
+        message: 'TenantId é obrigatório'
+      });
+      return;
+    }
+
+    const warmingPromises: Promise<void>[] = [];
+
+    switch (type) {
+      case 'contacts':
+        warmingPromises.push(warmContactsCache(tenantId));
+        break;
+      case 'analytics':
+        warmingPromises.push(warmAnalyticsCache(tenantId));
+        break;
+      case 'all':
+        warmingPromises.push(
+          warmContactsCache(tenantId),
+          warmAnalyticsCache(tenantId)
+        );
+        break;
+    }
+
+    await Promise.all(warmingPromises);
+
+    res.json({
+      success: true,
+      message: `Cache aquecido para tenant ${tenantId}`,
+      data: {
+        tenantId,
+        type,
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    console.error('Erro ao aquecer cache:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+};

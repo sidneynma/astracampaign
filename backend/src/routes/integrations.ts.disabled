@@ -1,0 +1,163 @@
+import { Router } from 'express';
+import { body, param, query } from 'express-validator';
+import { authMiddleware } from '../middleware/auth';
+import { adminMiddleware } from '../middleware/auth';
+import {
+  getIntegrations,
+  getIntegration,
+  createIntegration,
+  updateIntegration,
+  deleteIntegration,
+  testIntegration,
+  syncIntegration,
+  getIntegrationLogs,
+  handleWebhook
+} from '../controllers/integrationController';
+
+const router = Router();
+
+const integrationValidators = {
+  create: [
+    body('name')
+      .isLength({ min: 2 })
+      .withMessage('Nome deve ter pelo menos 2 caracteres')
+      .trim(),
+    body('type')
+      .isIn(['CRM', 'ERP', 'ECOMMERCE', 'WEBHOOK', 'API'])
+      .withMessage('Tipo deve ser CRM, ERP, ECOMMERCE, WEBHOOK ou API'),
+    body('config')
+      .isObject()
+      .withMessage('Configuração deve ser um objeto válido'),
+    body('credentials')
+      .isObject()
+      .withMessage('Credenciais devem ser um objeto válido'),
+    body('active')
+      .optional()
+      .isBoolean()
+      .withMessage('Ativo deve ser um valor booleano')
+  ],
+  update: [
+    body('name')
+      .optional()
+      .isLength({ min: 2 })
+      .withMessage('Nome deve ter pelo menos 2 caracteres')
+      .trim(),
+    body('type')
+      .optional()
+      .isIn(['CRM', 'ERP', 'ECOMMERCE', 'WEBHOOK', 'API'])
+      .withMessage('Tipo deve ser CRM, ERP, ECOMMERCE, WEBHOOK ou API'),
+    body('config')
+      .optional()
+      .isObject()
+      .withMessage('Configuração deve ser um objeto válido'),
+    body('credentials')
+      .optional()
+      .isObject()
+      .withMessage('Credenciais devem ser um objeto válido'),
+    body('active')
+      .optional()
+      .isBoolean()
+      .withMessage('Ativo deve ser um valor booleano')
+  ]
+};
+
+// Listar integrations com paginação e filtros
+router.get('/',
+  authMiddleware,
+  [
+    query('page').optional().isInt({ min: 1 }).withMessage('Página deve ser um número positivo'),
+    query('pageSize').optional().isInt({ min: 1, max: 100 }).withMessage('Tamanho da página deve estar entre 1 e 100'),
+    query('search').optional().isString().trim(),
+    query('type').optional().isIn(['CRM', 'ERP', 'ECOMMERCE', 'WEBHOOK', 'API']),
+    query('active').optional().isBoolean()
+  ],
+  getIntegrations
+);
+
+// Obter integration específica
+router.get('/:id',
+  authMiddleware,
+  [
+    param('id').isUUID().withMessage('ID deve ser um UUID válido')
+  ],
+  getIntegration
+);
+
+// Criar nova integration
+router.post('/',
+  authMiddleware,
+  adminMiddleware,
+  integrationValidators.create,
+  createIntegration
+);
+
+// Atualizar integration
+router.put('/:id',
+  authMiddleware,
+  adminMiddleware,
+  [
+    param('id').isUUID().withMessage('ID deve ser um UUID válido'),
+    ...integrationValidators.update
+  ],
+  updateIntegration
+);
+
+// Deletar integration
+router.delete('/:id',
+  authMiddleware,
+  adminMiddleware,
+  [
+    param('id').isUUID().withMessage('ID deve ser um UUID válido')
+  ],
+  deleteIntegration
+);
+
+// Testar integration
+router.post('/:id/test',
+  authMiddleware,
+  adminMiddleware,
+  [
+    param('id').isUUID().withMessage('ID deve ser um UUID válido')
+  ],
+  testIntegration
+);
+
+// Sincronizar integration
+router.post('/:id/sync',
+  authMiddleware,
+  adminMiddleware,
+  [
+    param('id').isUUID().withMessage('ID deve ser um UUID válido'),
+    body('direction')
+      .optional()
+      .isIn(['IMPORT', 'EXPORT', 'BIDIRECTIONAL'])
+      .withMessage('Direção deve ser IMPORT, EXPORT ou BIDIRECTIONAL'),
+    body('entities')
+      .optional()
+      .isArray()
+      .withMessage('Entidades deve ser um array')
+  ],
+  syncIntegration
+);
+
+// Obter logs de sincronização
+router.get('/:id/logs',
+  authMiddleware,
+  [
+    param('id').isUUID().withMessage('ID deve ser um UUID válido'),
+    query('page').optional().isInt({ min: 1 }).withMessage('Página deve ser um número positivo'),
+    query('pageSize').optional().isInt({ min: 1, max: 100 }).withMessage('Tamanho da página deve estar entre 1 e 100'),
+    query('status').optional().isIn(['PENDING', 'SUCCESS', 'ERROR'])
+  ],
+  getIntegrationLogs
+);
+
+// Webhook público (não requer autenticação)
+router.post('/webhook/:integrationId',
+  [
+    param('integrationId').isUUID().withMessage('ID da integração deve ser um UUID válido')
+  ],
+  handleWebhook
+);
+
+export default router;

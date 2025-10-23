@@ -1,0 +1,582 @@
+import { PrismaClient } from '@prisma/client';
+import { websocketService } from './websocketService';
+import { redisService } from './redisService';
+
+const prisma = new PrismaClient();
+
+export enum AuditAction {
+  // User actions
+  USER_LOGIN = 'USER_LOGIN',
+  USER_LOGOUT = 'USER_LOGOUT',
+  USER_CREATE = 'USER_CREATE',
+  USER_UPDATE = 'USER_UPDATE',
+  USER_DELETE = 'USER_DELETE',
+  PASSWORD_CHANGE = 'PASSWORD_CHANGE',
+
+  // Contact actions
+  CONTACT_CREATE = 'CONTACT_CREATE',
+  CONTACT_UPDATE = 'CONTACT_UPDATE',
+  CONTACT_DELETE = 'CONTACT_DELETE',
+  CONTACT_IMPORT = 'CONTACT_IMPORT',
+  CONTACT_EXPORT = 'CONTACT_EXPORT',
+
+  // Campaign actions
+  CAMPAIGN_CREATE = 'CAMPAIGN_CREATE',
+  CAMPAIGN_UPDATE = 'CAMPAIGN_UPDATE',
+  CAMPAIGN_DELETE = 'CAMPAIGN_DELETE',
+  CAMPAIGN_START = 'CAMPAIGN_START',
+  CAMPAIGN_PAUSE = 'CAMPAIGN_PAUSE',
+  CAMPAIGN_STOP = 'CAMPAIGN_STOP',
+  CAMPAIGN_SCHEDULE = 'CAMPAIGN_SCHEDULE',
+
+  // Message actions
+  MESSAGE_SEND = 'MESSAGE_SEND',
+  MESSAGE_RECEIVE = 'MESSAGE_RECEIVE',
+  MESSAGE_DELIVERED = 'MESSAGE_DELIVERED',
+  MESSAGE_READ = 'MESSAGE_READ',
+  MESSAGE_FAILED = 'MESSAGE_FAILED',
+
+  // System actions
+  SYSTEM_BACKUP = 'SYSTEM_BACKUP',
+  SYSTEM_RESTORE = 'SYSTEM_RESTORE',
+  SYSTEM_UPDATE = 'SYSTEM_UPDATE',
+  SYSTEM_MAINTENANCE = 'SYSTEM_MAINTENANCE',
+
+  // Integration actions
+  INTEGRATION_CREATE = 'INTEGRATION_CREATE',
+  INTEGRATION_UPDATE = 'INTEGRATION_UPDATE',
+  INTEGRATION_DELETE = 'INTEGRATION_DELETE',
+  INTEGRATION_SYNC = 'INTEGRATION_SYNC',
+
+  // Automation actions
+  AUTOMATION_CREATE = 'AUTOMATION_CREATE',
+  AUTOMATION_UPDATE = 'AUTOMATION_UPDATE',
+  AUTOMATION_DELETE = 'AUTOMATION_DELETE',
+  AUTOMATION_EXECUTE = 'AUTOMATION_EXECUTE',
+
+  // Security actions
+  SECURITY_LOGIN_ATTEMPT = 'SECURITY_LOGIN_ATTEMPT',
+  SECURITY_PERMISSION_DENIED = 'SECURITY_PERMISSION_DENIED',
+  SECURITY_API_KEY_CREATE = 'SECURITY_API_KEY_CREATE',
+  SECURITY_API_KEY_REVOKE = 'SECURITY_API_KEY_REVOKE',
+
+  // Data actions
+  DATA_EXPORT = 'DATA_EXPORT',
+  DATA_IMPORT = 'DATA_IMPORT',
+  DATA_DELETE = 'DATA_DELETE',
+  DATA_BACKUP = 'DATA_BACKUP'
+}
+
+export enum AuditSeverity {
+  LOW = 'LOW',
+  MEDIUM = 'MEDIUM',
+  HIGH = 'HIGH',
+  CRITICAL = 'CRITICAL'
+}
+
+export interface AuditLogEntry {
+  id?: string;
+  action: AuditAction;
+  severity: AuditSeverity;
+  tenantId: string;
+  userId?: string;
+  entityType?: string;
+  entityId?: string;
+  details: any;
+  ipAddress?: string;
+  userAgent?: string;
+  metadata?: any;
+  timestamp: Date;
+}
+
+export interface AuditQuery {
+  tenantId?: string;
+  userId?: string;
+  action?: AuditAction;
+  entityType?: string;
+  entityId?: string;
+  severity?: AuditSeverity;
+  startDate?: Date;
+  endDate?: Date;
+  ipAddress?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+export class AuditService {
+  private static instance: AuditService;
+
+  private constructor() {
+    // Initialize any required connections or configurations
+  }
+
+  public static getInstance(): AuditService {
+    if (!AuditService.instance) {
+      AuditService.instance = new AuditService();
+    }
+    return AuditService.instance;
+  }
+
+  // Core audit logging
+  public async log(entry: AuditLogEntry): Promise<void> {
+    try {
+      console.log(`📝 Audit Log: [${entry.severity}] ${entry.action} by user ${entry.userId} in tenant ${entry.tenantId}`);
+
+      // Store in database
+      await prisma.auditLog.create({
+        data: {
+          action: entry.action,
+          severity: entry.severity,
+          tenantId: entry.tenantId,
+          userId: entry.userId,
+          entityType: entry.entityType,
+          entityId: entry.entityId,
+          details: entry.details,
+          ipAddress: entry.ipAddress,
+          userAgent: entry.userAgent,
+          metadata: entry.metadata,
+          timestamp: entry.timestamp || new Date()
+        }
+      });
+
+      // Cache recent logs for quick access
+      await this.cacheRecentLog(entry);
+
+      // Send real-time notifications for high/critical severity
+      if (entry.severity === AuditSeverity.HIGH || entry.severity === AuditSeverity.CRITICAL) {
+        await this.notifyHighSeverityEvent(entry);
+      }
+
+      // Check for suspicious patterns
+      if (this.isSuspiciousActivity(entry)) {
+        await this.handleSuspiciousActivity(entry);
+      }
+
+    } catch (error) {
+      console.error('❌ Failed to log audit entry:', error);
+    }
+  }
+
+  // Specific audit methods for different actions
+  public async logUserAction(
+    action: AuditAction,
+    userId: string,
+    tenantId: string,
+    details: any,
+    request?: any
+  ): Promise<void> {
+    await this.log({
+      action,
+      severity: this.getSeverityForAction(action),
+      tenantId,
+      userId,
+      entityType: 'User',
+      entityId: userId,
+      details,
+      ipAddress: request?.ip,
+      userAgent: request?.get('User-Agent'),
+      timestamp: new Date()
+    });
+  }
+
+  public async logDataChange(
+    action: AuditAction,
+    entityType: string,
+    entityId: string,
+    tenantId: string,
+    userId: string,
+    oldData: any,
+    newData: any,
+    request?: any
+  ): Promise<void> {
+    const changes = this.calculateChanges(oldData, newData);
+
+    await this.log({
+      action,
+      severity: this.getSeverityForAction(action),
+      tenantId,
+      userId,
+      entityType,
+      entityId,
+      details: {
+        changes,
+        oldData: this.sanitizeData(oldData),
+        newData: this.sanitizeData(newData)
+      },
+      ipAddress: request?.ip,
+      userAgent: request?.get('User-Agent'),
+      timestamp: new Date()
+    });
+  }
+
+  public async logSecurityEvent(
+    action: AuditAction,
+    tenantId: string,
+    userId: string | null,
+    details: any,
+    request?: any
+  ): Promise<void> {
+    await this.log({
+      action,
+      severity: AuditSeverity.HIGH,
+      tenantId,
+      userId,
+      entityType: 'Security',
+      details,
+      ipAddress: request?.ip,
+      userAgent: request?.get('User-Agent'),
+      metadata: {
+        sessionId: request?.sessionID,
+        referrer: request?.get('Referrer')
+      },
+      timestamp: new Date()
+    });
+  }
+
+  public async logSystemEvent(
+    action: AuditAction,
+    details: any,
+    severity: AuditSeverity = AuditSeverity.MEDIUM
+  ): Promise<void> {
+    await this.log({
+      action,
+      severity,
+      tenantId: 'system',
+      entityType: 'System',
+      details,
+      timestamp: new Date()
+    });
+  }
+
+  // Query and retrieval methods
+  public async getAuditLogs(query: AuditQuery): Promise<{
+    logs: any[];
+    total: number;
+    page: number;
+    pageSize: number;
+    totalPages: number;
+  }> {
+    const page = query.page || 1;
+    const pageSize = Math.min(query.pageSize || 50, 1000); // Max 1000 records per page
+    const skip = (page - 1) * pageSize;
+
+    const where: any = {};
+
+    if (query.tenantId) where.tenantId = query.tenantId;
+    if (query.userId) where.userId = query.userId;
+    if (query.action) where.action = query.action;
+    if (query.entityType) where.entityType = query.entityType;
+    if (query.entityId) where.entityId = query.entityId;
+    if (query.severity) where.severity = query.severity;
+    if (query.ipAddress) where.ipAddress = query.ipAddress;
+
+    if (query.startDate || query.endDate) {
+      where.timestamp = {};
+      if (query.startDate) where.timestamp.gte = query.startDate;
+      if (query.endDate) where.timestamp.lte = query.endDate;
+    }
+
+    const [logs, total] = await Promise.all([
+      prisma.auditLog.findMany({
+        where,
+        skip,
+        take: pageSize,
+        orderBy: { timestamp: 'desc' },
+        include: {
+          user: {
+            select: {
+              id: true,
+              nome: true,
+              email: true
+            }
+          }
+        }
+      }),
+      prisma.auditLog.count({ where })
+    ]);
+
+    const totalPages = Math.ceil(total / pageSize);
+
+    return {
+      logs,
+      total,
+      page,
+      pageSize,
+      totalPages
+    };
+  }
+
+  public async getAuditTimeline(
+    entityType: string,
+    entityId: string,
+    tenantId: string
+  ): Promise<any[]> {
+    return await prisma.auditLog.findMany({
+      where: {
+        entityType,
+        entityId,
+        tenantId
+      },
+      orderBy: { timestamp: 'asc' },
+      include: {
+        user: {
+          select: {
+            nome: true,
+            email: true
+          }
+        }
+      }
+    });
+  }
+
+  public async getAuditStatistics(
+    tenantId: string,
+    startDate?: Date,
+    endDate?: Date
+  ): Promise<any> {
+    const where: any = { tenantId };
+
+    if (startDate || endDate) {
+      where.timestamp = {};
+      if (startDate) where.timestamp.gte = startDate;
+      if (endDate) where.timestamp.lte = endDate;
+    }
+
+    const [
+      totalLogs,
+      actionStats,
+      severityStats,
+      userStats,
+      dailyStats
+    ] = await Promise.all([
+      prisma.auditLog.count({ where }),
+
+      prisma.auditLog.groupBy({
+        by: ['action'],
+        where,
+        _count: { action: true },
+        orderBy: { _count: { action: 'desc' } }
+      }),
+
+      prisma.auditLog.groupBy({
+        by: ['severity'],
+        where,
+        _count: { severity: true }
+      }),
+
+      prisma.auditLog.groupBy({
+        by: ['userId'],
+        where: { ...where, userId: { not: null } },
+        _count: { userId: true },
+        orderBy: { _count: { userId: 'desc' } },
+        take: 10
+      }),
+
+      prisma.auditLog.findMany({
+        where,
+        select: {
+          timestamp: true,
+          action: true
+        }
+      })
+    ]);
+
+    // Process daily statistics
+    const dailyMap = new Map<string, number>();
+    dailyStats.forEach(log => {
+      const date = log.timestamp.toISOString().split('T')[0];
+      dailyMap.set(date, (dailyMap.get(date) || 0) + 1);
+    });
+
+    const dailyActivity = Array.from(dailyMap.entries())
+      .map(([date, count]) => ({ date, count }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    return {
+      totalLogs,
+      actionStats,
+      severityStats,
+      userStats,
+      dailyActivity,
+      period: {
+        startDate,
+        endDate
+      }
+    };
+  }
+
+  // Data retention and cleanup
+  public async cleanupOldLogs(retentionDays: number = 90): Promise<number> {
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - retentionDays);
+
+    const result = await prisma.auditLog.deleteMany({
+      where: {
+        timestamp: {
+          lt: cutoffDate
+        },
+        severity: {
+          notIn: [AuditSeverity.HIGH, AuditSeverity.CRITICAL] // Keep important logs longer
+        }
+      }
+    });
+
+    console.log(`🗑️ Cleaned up ${result.count} old audit logs`);
+    return result.count;
+  }
+
+  // Export functionality
+  public async exportAuditLogs(
+    query: AuditQuery,
+    format: 'json' | 'csv' = 'json'
+  ): Promise<string> {
+    const { logs } = await this.getAuditLogs({ ...query, pageSize: 10000 });
+
+    if (format === 'csv') {
+      return this.convertToCSV(logs);
+    }
+
+    return JSON.stringify(logs, null, 2);
+  }
+
+  // Helper methods
+  private getSeverityForAction(action: AuditAction): AuditSeverity {
+    const highSeverityActions = [
+      AuditAction.USER_DELETE,
+      AuditAction.DATA_DELETE,
+      AuditAction.CAMPAIGN_DELETE,
+      AuditAction.SYSTEM_MAINTENANCE
+    ];
+
+    const criticalActions = [
+      AuditAction.SECURITY_PERMISSION_DENIED,
+      AuditAction.SECURITY_LOGIN_ATTEMPT,
+      AuditAction.SYSTEM_BACKUP,
+      AuditAction.DATA_EXPORT
+    ];
+
+    if (criticalActions.includes(action)) {
+      return AuditSeverity.CRITICAL;
+    } else if (highSeverityActions.includes(action)) {
+      return AuditSeverity.HIGH;
+    } else {
+      return AuditSeverity.MEDIUM;
+    }
+  }
+
+  private calculateChanges(oldData: any, newData: any): any {
+    if (!oldData || !newData) return null;
+
+    const changes: any = {};
+    const allKeys = new Set([...Object.keys(oldData), ...Object.keys(newData)]);
+
+    for (const key of allKeys) {
+      if (oldData[key] !== newData[key]) {
+        changes[key] = {
+          from: oldData[key],
+          to: newData[key]
+        };
+      }
+    }
+
+    return Object.keys(changes).length > 0 ? changes : null;
+  }
+
+  private sanitizeData(data: any): any {
+    if (!data) return data;
+
+    const sensitiveFields = ['senha', 'password', 'token', 'secret', 'key', 'credentials'];
+    const sanitized = { ...data };
+
+    sensitiveFields.forEach(field => {
+      if (sanitized[field]) {
+        sanitized[field] = '[REDACTED]';
+      }
+    });
+
+    return sanitized;
+  }
+
+  private async cacheRecentLog(entry: AuditLogEntry): Promise<void> {
+    const cacheKey = `recent_logs:${entry.tenantId}`;
+
+    try {
+      // Get existing recent logs
+      const recentLogs = await redisService.lrange(cacheKey, 0, 99) || [];
+
+      // Add new log to the beginning
+      await redisService.lpush(cacheKey, [entry], { ttl: 3600 }); // 1 hour TTL
+
+      // Keep only the latest 100 logs
+      if (recentLogs.length >= 100) {
+        // Redis will automatically maintain the list size with LTRIM
+      }
+    } catch (error) {
+      console.error('Failed to cache recent log:', error);
+    }
+  }
+
+  private async notifyHighSeverityEvent(entry: AuditLogEntry): Promise<void> {
+    try {
+      await websocketService.notifyTenant(entry.tenantId, {
+        title: 'Evento de Segurança',
+        message: `Ação ${entry.action} detectada com severidade ${entry.severity}`,
+        type: entry.severity === AuditSeverity.CRITICAL ? 'ERROR' : 'WARNING',
+        data: {
+          action: entry.action,
+          severity: entry.severity,
+          timestamp: entry.timestamp
+        }
+      });
+    } catch (error) {
+      console.error('Failed to notify high severity event:', error);
+    }
+  }
+
+  private isSuspiciousActivity(entry: AuditLogEntry): boolean {
+    // Simple suspicious activity detection
+    const suspiciousActions = [
+      AuditAction.SECURITY_LOGIN_ATTEMPT,
+      AuditAction.DATA_EXPORT,
+      AuditAction.DATA_DELETE
+    ];
+
+    return suspiciousActions.includes(entry.action);
+  }
+
+  private async handleSuspiciousActivity(entry: AuditLogEntry): Promise<void> {
+    console.log(`🚨 Suspicious activity detected: ${entry.action} from ${entry.ipAddress}`);
+
+    // Log as critical security event
+    await this.logSecurityEvent(
+      AuditAction.SECURITY_PERMISSION_DENIED,
+      entry.tenantId,
+      entry.userId,
+      {
+        suspiciousAction: entry.action,
+        originalDetails: entry.details
+      }
+    );
+  }
+
+  private convertToCSV(data: any[]): string {
+    if (data.length === 0) return '';
+
+    const headers = Object.keys(data[0]);
+    const csvContent = [
+      headers.join(','),
+      ...data.map(row =>
+        headers.map(header => {
+          const value = row[header];
+          return typeof value === 'string' && value.includes(',')
+            ? `"${value}"`
+            : value;
+        }).join(',')
+      )
+    ].join('\n');
+
+    return csvContent;
+  }
+}
+
+export const auditService = AuditService.getInstance();
