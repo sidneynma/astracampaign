@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import toast from 'react-hot-toast';
 import { Header } from '../components/Header';
 import { Portal } from '../components/Portal';
+import AgendarPorContatoModal from "../components/AgendarPorContatoModal";
+
 
 type MessageContent =
   | { text: string }
